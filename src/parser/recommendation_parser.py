@@ -19,10 +19,15 @@ class RecommendationParser:
     _destination = re.compile(r"^放置于我方([1-9]\d*)号位$")
     _minion_attack = re.compile(r"^操作([1-9]\d*)号位随从攻击$")
     _hero_attack = re.compile(r"^操作我方英雄攻击$")
+    # 地标（37.0 起场上实体）也可以是法术/战吼的目标，如拆迁修理工
+    # 「战吼：摧毁一个敌方地标」的推荐「目标是敌方N号位地标」。
     _target = re.compile(
-        r"^目标是(?:对方|敌方)([1-9]\d*)号位(?:随从)?$")
+        r"^目标是(?:对方|敌方)([1-9]\d*)号位(随从|地标)?$")
     _friendly_hand_target = re.compile(
-        r"^目标是(?:己方|我方)([1-9]\d*)号位(?:随从)?$")
+        r"^目标是(?:己方|我方)([1-9]\d*)号位(随从|地标)?$")
+    # 盒子也可能直接写动作式目标行（无「目标」前缀），如「摧毁敌方1号位地标」
+    _destroy_location_target = re.compile(
+        r"^摧毁(?:敌方|对方)([1-9]\d*)号位地标$")
     _enemy_hero_targets = {"目标是对方英雄", "目标是敌方英雄"}
     _friendly_hero_targets = {"目标是己方英雄", "目标是我方英雄"}
     _location = re.compile(r"^操作([1-9]\d*)号位地标$")
@@ -45,6 +50,7 @@ class RecommendationParser:
                     or parser._destination.fullmatch(line)
                     or parser._target.fullmatch(line)
                     or parser._friendly_hand_target.fullmatch(line)
+                    or parser._destroy_location_target.fullmatch(line)
                     or line in parser._enemy_hero_targets
                     or "目标" in line
                     or line == "选择卡牌"
@@ -98,24 +104,44 @@ class RecommendationParser:
                 enemy_board_targets = [
                     match for line in lines
                     if (match := self._target.fullmatch(line))
-                ]
+                    and match.group(2) != "地标"]
                 friendly_board_targets = [
                     match for line in lines
                     if (match := self._friendly_hand_target.fullmatch(line))
-                ]
+                    and match.group(2) != "地标"]
+                # 地标目标（如拆迁修理工「摧毁一个敌方地标」）单独收集
+                location_targets = [
+                    match for line in lines
+                    if (match := self._target.fullmatch(line))
+                    and match.group(2) == "地标"]
+                location_targets += [
+                    match for line in lines
+                    if (match := self._friendly_hand_target.fullmatch(line))
+                    and match.group(2) == "地标"]
+                location_targets += [
+                    match for line in lines
+                    if (match := self._destroy_location_target.fullmatch(
+                        line))]
                 enemy_hero_targets = sum(
                     line in self._enemy_hero_targets for line in lines)
                 friendly_hero_targets = sum(
                     line in self._friendly_hero_targets for line in lines)
-                target_lines = [line for line in lines if "目标" in line]
+                target_lines = [
+                    line for line in lines
+                    if "目标" in line
+                    or self._destroy_location_target.fullmatch(line)]
                 if len(target_lines) > 1:
                     raise RecommendationParseError("ambiguous_target")
                 target_count = (
                     len(enemy_board_targets) + len(friendly_board_targets)
+                    + len(location_targets)
                     + enemy_hero_targets + friendly_hero_targets)
                 if target_lines and target_count != 1:
                     raise RecommendationParseError("unsupported_spell_target")
-                if enemy_board_targets:
+                if location_targets:
+                    target = SlotRef("location_slot", "enemy",
+                                     int(location_targets[0].group(1)))
+                elif enemy_board_targets:
                     target = SlotRef(
                         "board_slot", "enemy",
                         int(enemy_board_targets[0].group(1)))
@@ -174,8 +200,24 @@ class RecommendationParser:
         attack = self._minion_attack.fullmatch(primary)
         hero_attack = self._hero_attack.fullmatch(primary)
         if attack or hero_attack:
+            # 古神/类泰坦技能（37.0 实测句式）：盒子用「操作N号位随从攻击」
+            # +「选择卡牌/技能名」表达"点开古神技能菜单并选择该技能"。有
+            # 选择卡牌标记且能提取出技能名时按技能处理，否则走普通攻击。
+            ability_name = (self._peek_choose_one_name(lines)
+                            if attack else None)
+            if ability_name is not None:
+                target = self._optional_board_or_hero_target(
+                    lines, "unsupported_ability_target")
+                return self._build(
+                    ocr, turn_number, log_revision,
+                    ActionKind.USE_MINION_ABILITY,
+                    source=SlotRef("board_slot", "friendly",
+                                   int(attack.group(1))),
+                    target=target, choice_name=ability_name)
             targets = [self._target.fullmatch(line) for line in lines]
-            targets = [match for match in targets if match]
+            # 随从不能攻击地标：地标目标行不参与攻击匹配
+            targets = [match for match in targets
+                       if match and match.group(2) != "地标"]
             targets.extend(
                 line for line in lines if line in self._enemy_hero_targets)
             if len(targets) > 1 or (not targets and hero_attack):
@@ -248,8 +290,24 @@ class RecommendationParser:
             return None
         return "undo" if match.group(1) == "回溯" else "keep"
 
+    def _peek_choose_one_name(self, lines):
+        """「选择卡牌」标记后的技能/选项名；无标记或歧义返回 None。"""
+        markers = [i for i, line in enumerate(lines) if line == "选择卡牌"]
+        if not markers:
+            return None
+        if len(markers) != 1 or markers[0] + 1 >= len(lines):
+            return None
+        candidate = lines[markers[0] + 1]
+        if (self._is_action_line(candidate)
+                or "目标" in candidate or candidate.startswith("放置于")):
+            return None
+        return candidate
+
     def _optional_board_or_hero_target(self, lines, unsupported_code):
-        target_lines = [line for line in lines if "目标" in line]
+        target_lines = [
+            line for line in lines
+            if "目标" in line
+            or self._destroy_location_target.fullmatch(line)]
         if len(target_lines) > 1:
             raise RecommendationParseError("ambiguous_target")
         if not target_lines:
@@ -261,12 +319,22 @@ class RecommendationParser:
             return SlotRef("hero", "enemy")
         if target_line in self._friendly_hero_targets:
             return SlotRef("hero", "friendly")
+        if enemy_board and enemy_board.group(2) == "地标":
+            return SlotRef("location_slot", "enemy",
+                           int(enemy_board.group(1)))
+        if friendly_board and friendly_board.group(2) == "地标":
+            return SlotRef("location_slot", "friendly",
+                           int(friendly_board.group(1)))
         if enemy_board:
             return SlotRef(
                 "board_slot", "enemy", int(enemy_board.group(1)))
         if friendly_board:
             return SlotRef(
                 "board_slot", "friendly", int(friendly_board.group(1)))
+        destroy = self._destroy_location_target.fullmatch(target_line)
+        if destroy:
+            return SlotRef("location_slot", "enemy",
+                           int(destroy.group(1)))
         raise RecommendationParseError(unsupported_code)
 
     @staticmethod
@@ -280,13 +348,19 @@ class RecommendationParser:
             ocr.normalized_text)
         lines = action_text.splitlines()
         markers = [i for i, line in enumerate(lines) if line == "选择卡牌"]
-        choice_name = None
-        if markers and action in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER):
-            if len(markers) != 1 or markers[0] + 1 >= len(lines):
-                raise RecommendationParseError("choose_one_name_required")
-            choice_name = lines[markers[0] + 1]
-            if (RecommendationParser()._is_action_line(choice_name)
-                    or "目标" in choice_name or choice_name.startswith("放置于")):
+        choice_name = kwargs.pop("choice_name", None)
+        if markers and action in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER,
+                                  ActionKind.USE_MINION_ABILITY):
+            if choice_name is None:
+                if len(markers) != 1 or markers[0] + 1 >= len(lines):
+                    raise RecommendationParseError("choose_one_name_required")
+                candidate = lines[markers[0] + 1]
+                if (RecommendationParser()._is_action_line(candidate)
+                        or "目标" in candidate or candidate.startswith("放置于")):
+                    raise RecommendationParseError("choose_one_name_required")
+                choice_name = candidate
+            if (action is ActionKind.USE_MINION_ABILITY
+                    and not choice_name):
                 raise RecommendationParseError("choose_one_name_required")
         return ProposedAction(
             action_id=f"action-{uuid.uuid4()}", frame_id=ocr.frame_id,

@@ -2,8 +2,11 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import random
 import time
+from types import SimpleNamespace
 
+from manual_controller import DiscoverChoiceAction
 from src.flow.hand_animation_delay import HandAnimationDelay
 from src.recommendation_models import ActionKind
 from src.safety.recommendation_validator import ConsumedActionStore
@@ -39,7 +42,11 @@ class RecommendationFlow:
                  consumed=None, post_action_delay=0.0,
                  post_action_pause=None,
                  hand_animation_delay=None,
-                 draw_extra_delay_per_card=0.0):
+                 draw_extra_delay_per_card=0.0,
+                 discover_random_fallback=False,
+                 discover_random_fallback_attempts=4,
+                 random_index_provider=None,
+                 recorder=None):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -65,6 +72,20 @@ class RecommendationFlow:
         #   * 回合内任何操作触发的抽牌，每张都算。
         self.draw_extra_delay_per_card = float(draw_extra_delay_per_card or 0.0)
         self._seen_entry_count = None
+        # 「随机拼装/发现兜底」：拼装/发现选择界面打开时，盒子可能长时间给不出
+        # 可读推荐（实测 2026-11-06 对局：4 选 1 界面打开期间连续 2 分多钟
+        # recommendation_not_stable）。连续失败达到阈值后随机点一个合法选项，
+        # 避免整局卡死。UI 是否打开以 Power.log 的 GENERAL_CHOICE 为准，
+        # 点击前会重新确认，绝不对着已关闭的界面盲点。
+        self.discover_random_fallback = bool(discover_random_fallback)
+        self.discover_random_fallback_attempts = max(
+            1, int(discover_random_fallback_attempts))
+        self._choice_fail_streak = 0
+        self._random_index = (random_index_provider
+                              if random_index_provider is not None
+                              else (lambda count: random.randrange(count)))
+        # 决策点采集器（案例库/行为克隆数据源；None=不采集）
+        self.recorder = recorder
         # 免费那张只让给“我方这个回合还没执行过动作时”出现的第一次手牌增加，
         # 这样 Power.log 晚几拍、出牌抽到的牌先被看到时，也不会被误当成免费那张。
         self._entry_turn = _UNSET_TURN
@@ -115,22 +136,20 @@ class RecommendationFlow:
                 current_frame, self.capture.crop_recommendation)
             if (current_evidence.normalized_text
                     != evidence.normalized_text):
-                return FlowStepResult(
-                    FlowStepStatus.RETRY, "recommendation_changed")
+                return self._retry_or_random_choice("recommendation_changed")
             validation = self.validator.validate(
                 proposed, adapted, stable_frame, current_frame,
                 current_evidence,
                 fresh_state, fresh_revision, "PLAYER_TURN", self.consumed,
                 self.stopped())
             if not validation.accepted:
-                return FlowStepResult(FlowStepStatus.RETRY, validation.code)
+                return self._retry_or_random_choice(validation.code)
             adapted, key = validation.value
             print(f"[推荐] {proposed.normalized_instruction}")
             print("[执行] 开始点击。")
             result = self.controller.execute(adapted.manual_action, fresh_state)
             if not result.executed or result.recovery_needed:
-                return FlowStepResult(FlowStepStatus.RETRY,
-                                      "execution_failed")
+                return self._retry_or_random_choice("execution_failed")
             # 本回合已经动过手：之后再出现的手牌增加都是“操作触发的抽牌”，
             # 不能再当成回合开始那张免费的。
             self._acted_this_turn = True
@@ -164,6 +183,9 @@ class RecommendationFlow:
                 fresh_state, fresh_revision)
             if verified == ResultStatus.COMPLETED:
                 self.consumed.mark_consumed(key)
+                self._choice_fail_streak = 0
+                self._record_decision(proposed, adapted, state,
+                                      source="box", verified=True)
                 return FlowStepResult(FlowStepStatus.EXECUTED)
             if verified == ResultStatus.WAITING_RECOMMENDATION:
                 # A discover click is not complete while Power.log still
@@ -179,12 +201,78 @@ class RecommendationFlow:
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
                     "waiting_recommendation_update")
-            return FlowStepResult(
-                FlowStepStatus.RETRY, "result_not_confirmed")
+            return self._retry_or_random_choice("result_not_confirmed")
         except Exception as exc:
-            return FlowStepResult(
-                FlowStepStatus.RETRY,
+            return self._retry_or_random_choice(
                 f"{type(exc).__name__}:{exc}")
+
+    def _record_decision(self, proposed, adapted, state, source,
+                         verified, menu=None, chosen_id=None):
+        """决策点采集（recorder 异常绝不外泄）。"""
+        if self.recorder is None:
+            return
+        try:
+            from src.brain.state_encoder import encode_state_features
+            self.recorder.record(
+                source=source,
+                game_generation=getattr(state, "game_generation", None),
+                turn=getattr(state, "game_num_turns_in_play", None),
+                state=encode_state_features(state),
+                instruction=proposed.normalized_instruction,
+                action=getattr(proposed.action, "value",
+                               str(proposed.action)),
+                verified=bool(verified),
+                menu=menu, chosen_id=chosen_id,
+            )
+        except Exception:
+            pass
+
+    def _retry_or_random_choice(self, diagnostics):
+        """普通重试出口；选择界面打开且连续失败达到阈值时随机点一个选项。
+
+        兜底只针对拼装/发现类选择（Power.log GENERAL_CHOICE 已确认界面
+        打开），点击前重新取状态再确认一次，避免对已关闭的界面盲点。
+        """
+        if self.discover_random_fallback:
+            try:
+                state, _revision = self.state_supplier()
+            except Exception:
+                state = None
+            count = (getattr(state, "discover_choice_count", None)
+                     if state is not None else None)
+            if count in (1, 2, 3, 4) and state is not None:
+                self._choice_fail_streak += 1
+                if self._choice_fail_streak >= (
+                        self.discover_random_fallback_attempts):
+                    index = self._random_index(count)
+                    # 拼装选择 UI 的点击布局与标准发现不同（按来源卡判定）
+                    from json_op import is_assembly_card
+                    source_card = getattr(
+                        state, "discover_choice_source_card_id", None)
+                    layout = ("assembly"
+                              if is_assembly_card(source_card)
+                              else "discover")
+                    self._announce(
+                        f"[SYS] 盒子推荐不可读（连续 "
+                        f"{self._choice_fail_streak} 次），随机选择拼装/"
+                        f"发现 {index + 1} 号位（共 {count} 项）")
+                    self._record_decision(
+                        SimpleNamespace(
+                            normalized_instruction=f"随机选择{index + 1}号位"
+                                                   f"（共{count}项）",
+                            action=ActionKind.CHOOSE_DISCOVER),
+                        None, state, source="random", verified=True)
+                    result = self.controller.execute(
+                        DiscoverChoiceAction(index, count, layout=layout),
+                        state)
+                    self._choice_fail_streak = 0
+                    if not result.executed or result.recovery_needed:
+                        return FlowStepResult(
+                            FlowStepStatus.RETRY,
+                            f"random_discover_failed:{result.message}")
+                    return FlowStepResult(
+                        FlowStepStatus.OBSERVE, "random_discover_choice")
+        return FlowStepResult(FlowStepStatus.RETRY, diagnostics)
 
     def _wait_for_hand_animation(self):
         """等待手牌入场动画完成，再取最新状态做校验（上游性能调优逻辑）。"""
@@ -383,6 +471,17 @@ class RecommendationFlow:
                 new is None
                 or getattr(new, "card_id", None)
                 != getattr(old, "card_id", None))
+        if kind == "minion_ability_used":
+            # 古神技能用掉后实体上的 ACTIVATABLE_MINION_ABILITY_USED_N 计数
+            # 变化（strategy 层汇总为 minion_abilities_used）。
+            old = RecommendationFlow._entity_by_id(
+                before.my_minions, source_entity_id)
+            new = RecommendationFlow._entity_by_id(
+                after.my_minions, source_entity_id)
+            if old is None or new is None:
+                return True
+            return (getattr(new, "minion_abilities_used", 0)
+                    != getattr(old, "minion_abilities_used", 0))
         if kind == "combat_state_changed":
             old_source = RecommendationFlow._entity_by_id(
                 before.my_minions, source_entity_id)

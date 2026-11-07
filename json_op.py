@@ -1,5 +1,7 @@
 import json
 import os
+from functools import lru_cache
+from pathlib import Path
 
 import requests
 
@@ -81,6 +83,46 @@ def query_json_dict(key):
 
     error_print(f"出现未识别卡牌，使用占位名称继续：{key}")
     return f"Unknown:{key}"
+
+
+# ---------------------------------------------------------------- 卡牌文字
+@lru_cache(maxsize=1)
+def _card_texts() -> dict:
+    """cardId → 规则文字（cards.json 的 text 字段；读取失败返回空表）。"""
+    try:
+        with (Path(__file__).resolve().parent / "cards.json").open(
+                encoding="utf8") as source:
+            data = json.load(source)
+        return {str(card.get("id") or ""): str(card.get("text") or "")
+                for card in data if card.get("id")}
+    except Exception:
+        return {}
+
+
+def card_text(card_id) -> str:
+    """卡牌规则文字（去 HTML 标记与占位符）；查不到返回空串。"""
+    text = _card_texts().get(str(card_id or ""), "")
+    if not text:
+        return ""
+    # HearthstoneJSON 的文字带 <b>/<i> 等标记与 #/$ 占位符，粗略清洗。
+    out, skip = [], False
+    for char in text:
+        if char == "<":
+            skip = True
+        elif char == ">":
+            skip = False
+        elif not skip:
+            out.append(char)
+    return "".join(out).replace("#", "").strip()
+
+
+def is_assembly_card(card_id) -> bool:
+    """是否拼装卡（37.0 新关键词）：规则文字含「拼装」。
+
+    cards.json 的 mechanics 字段对拼装卡不可靠（实测 BE_553 为 None），
+    文字标记是唯一稳定特征。
+    """
+    return "拼装" in card_text(card_id)
 
 
 if __name__ == "__main__":

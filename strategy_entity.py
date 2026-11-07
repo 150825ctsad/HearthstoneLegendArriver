@@ -42,7 +42,7 @@ class StrategyMinion(StrategyEntity):
         battlecry=0, not_targeted_by_spell=0, not_targeted_by_power=0,
         charge=0, rush=0, attackable_by_rush=0, frozen=0, dormant=0,
         untouchable=0, immune=0, cant_attack=0, exhausted=1,
-        num_turns_in_play=1,
+        num_turns_in_play=1, has_minion_abilities=0, minion_abilities_used=0,
     ):
         super().__init__(
             entity_id, card_id, zone, zone_pos, current_cost, overload, is_mine)
@@ -70,6 +70,11 @@ class StrategyMinion(StrategyEntity):
         self.cant_attack = cant_attack
         self.exhausted = exhausted
         self.num_turns_in_play = num_turns_in_play
+        # 古神/类泰坦技能（37.0）：识别依据是 Power.log 实体 tag
+        # ACTIVATABLE_MINION_ABILITY_USED_N（引擎级，不依赖 cards.json 的
+        # mechanics 字段——实测 37.0 的 BE_017 mechanics=None）。
+        self.has_minion_abilities = bool(has_minion_abilities)
+        self.minion_abilities_used = int(minion_abilities_used)
 
     @property
     def cardtype(self):

@@ -348,7 +348,7 @@ def _hearthstone_item() -> dict:
 
 
 def environment_items(config=None) -> list[dict]:
-    """管理员权限 / 分辨率 / 缩放 / 炉石窗口 / 日志目录 / OCR 模型。"""
+    """管理员权限 / 分辨率 / 缩放 / 炉石窗口 / 日志目录 / OCR 模型 / 硬件重启记录。"""
     config = config if config is not None else _config_handle()
 
     if _is_admin():
@@ -395,7 +395,23 @@ def environment_items(config=None) -> list[dict]:
             True, purpose)
 
     return [admin, screen, scaling, _hearthstone_item(),
-            _log_dir_item(), _ocr_model_item()]
+            _log_dir_item(), _ocr_model_item(), _crash_history_item()]
+
+
+def _crash_history_item() -> dict:
+    """硬件级意外重启检测（Kernel-Power 41 / WHEA-Logger 18）。
+
+    脚本没有任何会关机/重启系统的代码路径；整机若发生「无蓝屏的脏断电」，
+    原因在硬件层（CPU 机器校验错误/供电/散热）。这里读系统事件日志把它显式
+    报出来，避免用户把硬件故障误判成脚本 bug；检测失败只提示、绝不阻塞。
+    """
+    try:
+        from src.safety.crash_history import crash_history_item
+        return crash_history_item()
+    except Exception as exc:
+        return _item("crash-history", "硬件级意外重启（近 48h）", STATUS_WARN,
+                     f"无法检测：{type(exc).__name__}: {exc}", "", False,
+                     "整机稳定性排查（脚本无软件层关机路径）")
 
 
 # ---------------------------------------------------------------- 总入口

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -31,15 +32,47 @@ _env = os.environ.get
 def _load_ui_config() -> dict:
     """读取 ui_config.json；缺失/非法时返回空 dict（走默认值）。
 
-    只在模块加载时读一次。注意：RecommendationConfig.__post_init__ 里的
-    _user_roi()/_user_delays() 是每次实例化时重新读文件，以便校准工具或
-    Web 保存后无需重启即可生效。
+    带 stat 缓存：按文件的 (mtime_ns, size) 失效。Web 控制台 / 校准工具 /
+    浮窗保存配置必然更新 mtime，下一次调用立刻拿到新内容（"改完即时生效"
+    语义不变）；而网页每秒的 /api/status、自动化主循环、浮窗轮询等高频
+    调用不再每次读盘 + 解析（此前一次 /api/status 要读这个文件约 30 次）。
+    返回的是共享 dict，调用方只读、不得原地修改。
     """
+    global _UI_CACHE_KEY, _UI_CACHE
+    try:
+        stat = CONFIG_PATH.stat()
+        key = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {}
+    if _UI_CACHE_KEY == key and _UI_CACHE is not None:
+        return _UI_CACHE
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        data = data if isinstance(data, dict) else {}
     except Exception:
         return {}
+    with _UI_CACHE_LOCK:
+        _UI_CACHE = data
+        _UI_CACHE_KEY = key
+    return data
+
+
+def invalidate_ui_config_cache() -> None:
+    """写完 ui_config.json 后主动失效缓存（兜底 stat 精度，正常情况用不到）。"""
+    global _UI_CACHE_KEY, _UI_CACHE
+    with _UI_CACHE_LOCK:
+        _UI_CACHE_KEY = None
+        _UI_CACHE = None
+
+
+_UI_CACHE_KEY = None
+_UI_CACHE = None
+_UI_CACHE_LOCK = threading.Lock()
+
+
+def load_ui_config() -> dict:
+    """给外部模块（web_ui / FSM_action）用的只读 ui_config 视图（带缓存）。"""
+    return _load_ui_config()
 
 
 # 模块加载时缓存的 ui_config.json 内容（用于 USER_NAME / 日志目录等一次性设置）。
@@ -147,7 +180,118 @@ DEFAULT_HUMAN_LIKE = {
 }
 
 
-# ---------------------------------------------------------------- 炉石存活检测
+# ---------------------------------------------------------------- 发现/拼装随机兜底
+# 拼装（37.0 新关键词）/发现类选择界面打开时，盒子可能长时间给不出可读推荐
+# （实测 2026-11-06 对局：修补 BE_553 的 4 选 1 界面打开期间，面板连续 2 分多钟
+# recommendation_not_stable）。此时与其干等，不如在连续 N 次读取失败后随机点
+# 一个合法选项，让对局继续推进。
+#   enabled : 是否启用随机兜底（默认开）。
+#   attempts: 连续失败多少次后才随机点（默认 4，给盒子足够的机会先出推荐）。
+# 真实值保存在 ui_config.json 的 discover_fallback 段。
+DEFAULT_DISCOVER_FALLBACK = {"enabled": True, "attempts": 4}
+
+
+def discover_fallback_settings() -> dict:
+    """读取 ui_config.json 的 discover_fallback 段（每次调用都读文件，改完即时生效）。"""
+    cfg = dict(DEFAULT_DISCOVER_FALLBACK)
+    data = _load_ui_config().get("discover_fallback")
+    if isinstance(data, dict):
+        for key in cfg:
+            if data.get(key) is not None:
+                cfg[key] = data[key]
+    try:
+        cfg["enabled"] = bool(cfg["enabled"])
+        cfg["attempts"] = max(1, int(cfg["attempts"]))
+    except (TypeError, ValueError):
+        return dict(DEFAULT_DISCOVER_FALLBACK)
+    return cfg
+
+
+# ---------------------------------------------------------------- 拼装点击布局
+# 拼装（37.0）选择 UI 的点击坐标（「选择一项替换」：左右替换槽位 + 拼装确认）。
+# ui_config.json 的 assembly_layout 段（改动即时生效，无需重启）：
+#   "assembly_layout": {
+#       "positions": {"4": [[505,495],[505,495],[1330,495],[1330,495]]},
+#       "confirm": [940, 760]
+#   }
+# 未配置的选项数回退代码内置表（ASSEMBLY_POSITIONS），再回退标准发现布局。
+DEFAULT_ASSEMBLY_LAYOUT = {"positions": {}, "confirm": None}
+
+
+def assembly_layout_settings() -> dict:
+    """读取 ui_config.json 的 assembly_layout 段（每次调用都读文件）。"""
+    cfg = {"positions": {}, "confirm": None}
+    data = _load_ui_config().get("assembly_layout")
+    if isinstance(data, dict):
+        raw_positions = data.get("positions")
+        if isinstance(raw_positions, dict):
+            for count, positions in raw_positions.items():
+                try:
+                    cfg["positions"][int(count)] = [
+                        [int(x), int(y)] for x, y in positions]
+                except (TypeError, ValueError):
+                    continue
+        if data.get("confirm") is not None:
+            try:
+                cfg["confirm"] = [int(data["confirm"][0]),
+                                  int(data["confirm"][1])]
+            except (TypeError, ValueError, IndexError):
+                pass
+    return cfg
+
+
+# ---------------------------------------------------------------- 对局决策后端
+# 「谁来做游戏决策」的三种后端（ui_config.json 的 decision 段可切换）：
+#   box    : 现状——OCR 读炉石盒子「推荐打法」面板（默认，行为不变）
+#   shadow : 盒子照常决策并执行；LLM 同步给出「我会怎么打」写入日志做对比，
+#            用于切换前评估（影子模式，零风险）
+#   llm    : LLM 直接决策（合法动作菜单约束 + 盒子作回退）；API 失败/解析
+#            失败/动作被拒绝时自动回退盒子流程，不会空转
+# API 走 OpenAI 兼容接口。密钥两种填法（取值优先级：环境变量 > 本段）：
+#   1. 环境变量 HS_LLM_API_KEY
+#   2. 网页「🧠 决策模型」卡片填写，保存在本段 api_key 字段（本机配置文件，
+#      注意勿把 ui_config.json 分享出去）
+# 缺密钥时 llm/shadow 自动退化为 box 行为并告警一次。
+# 本地小模型预留：装好 Ollama/LM Studio 后把 api_base 改为
+#   http://127.0.0.1:11434/v1 并把 model 改成本地模型名即可无缝切换，
+#   代码无需改动（OpenAI 兼容接口）。
+DEFAULT_DECISION = {
+    "backend": "box",
+    "api_base": "https://open.bigmodel.cn/api/paas/v4",
+    "model": "glm-4-flash",
+    "api_key": "",
+    "timeout_seconds": 8.0,
+    "max_retries": 1,
+    "max_tokens": 200,
+    # 决策点采集（案例库/行为克隆数据源）：每次实际执行的决策写入
+    # logs/training_data.jsonl。默认开（纯本地记录，不影响对局）。
+    "record_data": True,
+    # 本地小模型预留字段（当前未启用；填上后可由上层路由分流简单决策）
+    "local_base_url": "",
+    "local_model": "",
+}
+
+
+def decision_settings() -> dict:
+    """读取 ui_config.json 的 decision 段（每次调用都读文件，改完即时生效）。"""
+    cfg = dict(DEFAULT_DECISION)
+    data = _load_ui_config().get("decision")
+    if isinstance(data, dict):
+        for key in cfg:
+            if data.get(key) is not None:
+                cfg[key] = data[key]
+    if cfg["backend"] not in ("box", "shadow", "llm"):
+        cfg["backend"] = "box"
+    try:
+        cfg["timeout_seconds"] = max(1.0, float(cfg["timeout_seconds"]))
+        cfg["max_retries"] = max(0, int(cfg["max_retries"]))
+        cfg["max_tokens"] = max(32, int(cfg["max_tokens"]))
+    except (TypeError, ValueError):
+        pass
+    return cfg
+
+
+# ---------------------------------------------------------------- 存活检测
 # 挂机时最常见的两个“脚本不知道炉石已经没了”的场景（issue 反馈：
 # 炉石在换牌界面闪退后，脚本仍对失效画面做 OCR，空转近 3 小时）：
 #   1. Hearthstone.exe 进程消失（闪退/被杀/关掉）—— 权威信号，最可靠；
@@ -252,6 +396,7 @@ def save_overlay_setting(key: str, value) -> dict:
     data["overlay"] = section
     CONFIG_PATH.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    invalidate_ui_config_cache()
     return {**DEFAULT_OVERLAY, **section}
 
 
@@ -296,9 +441,7 @@ def _user_roi() -> Optional[tuple[int, int, int, int]]:
     返回格式：(left, top, right, bottom)，必须满足 left<right && top<bottom。
     """
     try:
-        cfg_path = ROOT / "ui_config.json"
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        roi = data.get("recommendation_roi")
+        roi = _load_ui_config().get("recommendation_roi")
         vals = tuple(int(v) for v in roi)
         if len(vals) == 4 and 0 <= vals[0] < vals[2] and 0 <= vals[1] < vals[3]:
             return vals
@@ -314,9 +457,7 @@ def _user_confirm_roi() -> Optional[tuple[int, int, int, int]]:
     按钮不在 → 面板未就绪或已提交，不盲目点击。格式同 recommendation_roi。
     """
     try:
-        cfg_path = ROOT / "ui_config.json"
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        roi = data.get("mulligan_confirm_roi")
+        roi = _load_ui_config().get("mulligan_confirm_roi")
         vals = tuple(int(v) for v in roi)
         if len(vals) == 4 and 0 <= vals[0] < vals[2] and 0 <= vals[1] < vals[3]:
             return vals
@@ -349,9 +490,7 @@ def _user_delays() -> dict:
     重新读文件，Web 保存后无需重启即对新开局/下回合生效。
     """
     try:
-        cfg_path = ROOT / "ui_config.json"
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        delays = data.get("delays") or {}
+        delays = _load_ui_config().get("delays") or {}
         result = {}
         for key in _USER_DELAY_KEYS:
             if key in delays:

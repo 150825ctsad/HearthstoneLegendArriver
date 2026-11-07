@@ -46,16 +46,48 @@ def _default_dpi_reader() -> int:
         return 0
 
 
+# 进程门槛检查的缓存时长（秒）：截图前确认炉石+盒子都在，不需要每次都枚举
+# 全部进程；进程消失由存活检测（src/safety/hearthstone_liveness）独立负责。
+_PROCESS_CHECK_TTL = 2.0
+_PROCESS_CACHE_AT = -1e9
+_PROCESS_CACHE_VALUE = False
+
+
 def _default_process_checker() -> bool:
+    """Hearthstone.exe 与 hsang.exe（盒子）是否都在运行；结果缓存 2 秒。
+
+    每次 OCR 周期会多次截图（稳定帧 2~3 次 + 执行前后校验），原先每次截图
+    都用 psutil 遍历全部进程，是截图前置开销的大头。这里：
+      1) 复用 hearthstone_liveness 的 ctypes 快照枚举（一次系统调用拿到
+         全部进程名，比 psutil 逐进程取 name 快得多）；
+      2) 结果按 2s TTL 缓存 —— 与存活检测器的缓存周期一致（进程生死由
+         存活检测负责，这里只是"截图前两个应用都在"的门槛判断）。
+    ctypes 枚举失败（无权限等）时回退 psutil，仍失败按"不在运行"处理，
+    与旧行为一致。
+    """
+    global _PROCESS_CACHE_AT, _PROCESS_CACHE_VALUE
+    now = time.monotonic()
+    if now - _PROCESS_CACHE_AT < _PROCESS_CHECK_TTL:
+        return _PROCESS_CACHE_VALUE
+    names = None
     try:
-        import psutil
-        names = {
-            (process.info.get("name") or "").lower()
-            for process in psutil.process_iter(["name"])
-        }
-        return "hearthstone.exe" in names and "hsang.exe" in names
+        from src.safety.hearthstone_liveness import list_process_names
+        names = list_process_names()
     except Exception:
-        return False
+        names = None
+    if names is None:
+        try:
+            import psutil
+            names = {
+                (process.info.get("name") or "").lower()
+                for process in psutil.process_iter(["name"])
+            }
+        except Exception:
+            names = None
+    running = bool(names) and "hearthstone.exe" in names and "hsang.exe" in names
+    _PROCESS_CACHE_AT = now
+    _PROCESS_CACHE_VALUE = running
+    return running
 
 
 def _default_window_reader() -> tuple[int, bool]:

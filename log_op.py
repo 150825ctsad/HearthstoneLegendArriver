@@ -82,6 +82,14 @@ GENERAL_CHOICE_START_PATTERN = re.compile(
     r"D [\d]{2}:[\d]{2}:[\d]{2}\.[\d]{7} "
     r"GameState\.DebugPrintEntityChoices\(\) - id=(\d+) .*"
     r"ChoiceType=GENERAL(?: .*)?$")
+# 选择 UI 的来源卡（拼装卡/发现卡），如：
+# "GameState.DebugPrintEntityChoices() -   Source=[entityName=修补 id=34 zone=PLAY
+#  zonePos=0 cardId=BE_553 player=2]"（注意 "- " 后是多空格缩进）。用于区分
+# 拼装 UI 与普通发现 UI（点击布局不同）。
+GENERAL_CHOICE_SOURCE_PATTERN = re.compile(
+    r"D [\d]{2}:[\d]{2}:[\d]{2}\.[\d]{7} "
+    r"GameState\.DebugPrintEntityChoices\(\) - +Source=\[.*cardId=(\S*) "
+    r"player=(\d+)\]$")
 GENERAL_CHOICE_ENTITY_PATTERN = re.compile(
     r"D [\d]{2}:[\d]{2}:[\d]{2}\.[\d]{7} "
     r"GameState\.DebugPrintEntityChoices\(\) - +Entities\[(\d+)\]="
@@ -181,6 +189,14 @@ def parse_line(line_str):
         return LineInfoContainer(
             LOG_LINE_GENERAL_CHOICE_START,
             choice_id=match_obj.group(1),
+        )
+
+    match_obj = GENERAL_CHOICE_SOURCE_PATTERN.match(line_str)
+    if match_obj is not None:
+        return LineInfoContainer(
+            LOG_LINE_GENERAL_CHOICE_SOURCE,
+            card_id=match_obj.group(1),
+            player=match_obj.group(2),
         )
 
     match_obj = GENERAL_CHOICE_ENTITY_PATTERN.match(line_str)

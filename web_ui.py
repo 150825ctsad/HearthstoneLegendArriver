@@ -42,7 +42,8 @@ CONFIG_PATH = ROOT / "ui_config.json"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
 from config import (
     DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, DEFAULT_LIVENESS, HOST,
-    BASE_PORT, LOG_BUFFER_SIZE, _USER_DELAY_KEYS, RecommendationConfig)
+    BASE_PORT, LOG_BUFFER_SIZE, _USER_DELAY_KEYS, RecommendationConfig,
+    _load_ui_config, decision_settings, invalidate_ui_config_cache)
 # 环境自检（Python 3.12 / 依赖包 / 分辨率缩放）与原样截图区域框预览。
 import screen_regions
 import selfcheck
@@ -71,10 +72,11 @@ DEFAULT_CONFIG = {
 
 
 def load_config() -> dict:
+    # 读盘+解析由 config._load_ui_config 的 stat 缓存承担（保存后立即失效），
+    # /api/status 每秒轮询不再反复读 ui_config.json。返回的是合并后的新 dict，
+    # 顶层可改；嵌套段是共享缓存，写入方须复制后整体替换（现有 api_save_* 均如此）。
     try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf8"))
-        if not isinstance(data, dict):
-            return dict(DEFAULT_CONFIG)
+        data = _load_ui_config()
         return {**DEFAULT_CONFIG, **data}
     except Exception:
         return dict(DEFAULT_CONFIG)
@@ -86,6 +88,8 @@ def save_config(cfg: dict):
             json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf8")
     except Exception as exc:
         _log("WARN", f"配置保存失败：{exc}")
+    finally:
+        invalidate_ui_config_cache()
 
 
 # ---------------------------------------------------------------- 运行日志缓冲
@@ -715,8 +719,10 @@ _DELAY_BOUNDS = {
 
 def _current_delays() -> dict:
     """返回当前生效的延时配置（默认值叠加 ui_config.json 的 delays 段）。"""
-    return {key: getattr(RecommendationConfig(), key)
-            for key in _USER_DELAY_KEYS}
+    # 一次实例化取全部字段：RecommendationConfig.__post_init__ 要跑 ROI/延时
+    # 三段配置合并，逐字段实例化会把它跑 8 遍（此前 /api/status 每秒都如此）。
+    cfg = RecommendationConfig()
+    return {key: getattr(cfg, key) for key in _USER_DELAY_KEYS}
 
 
 def api_save_delays(body):
@@ -1266,6 +1272,56 @@ def api_cancel_schedule():
     return {"ok": True, "message": "定时任务已取消"}
 
 
+# ------------------------------------------------------------------ 决策模型
+def _decision_status() -> dict:
+    """决策模型配置的展示态（密钥只回显是否已配置 + 尾号 4 位）。"""
+    cfg = decision_settings()
+    key = str(cfg.get("api_key") or "")
+    import os
+    env_key = os.environ.get("HS_LLM_API_KEY") or ""
+    return {
+        "backend": cfg.get("backend", "box"),
+        "api_base": cfg.get("api_base", ""),
+        "model": cfg.get("model", ""),
+        "api_key_set": bool(key or env_key),
+        "api_key_from_env": bool(env_key),
+        "api_key_tail": (key[-4:] if key else env_key[-4:] if env_key else ""),
+    }
+
+
+def api_save_decision(body: dict):
+    """保存决策模型配置（ui_config.json 的 decision 段）。
+
+    密钥留空 = 保留原值（网页不回传原文）；填 "-" 清除。
+    后端切换在下一局开始时生效（每局初始化时读取）。
+    """
+    backend = str(body.get("backend") or "").strip()
+    if backend and backend not in ("box", "shadow", "llm"):
+        return {"ok": False, "error": "未知决策后端。"}
+    with CTRL.lock:
+        cfg = load_config()
+        decision = dict(cfg.get("decision") or {})
+        if backend:
+            decision["backend"] = backend
+        for field in ("api_base", "model"):
+            if field in body:
+                decision[field] = str(body.get(field) or "").strip()
+        if "api_key" in body:
+            key = str(body.get("api_key") or "").strip()
+            if key == "-":
+                decision["api_key"] = ""
+            elif key:
+                decision["api_key"] = key
+        cfg["decision"] = decision
+        save_config(cfg)
+    masked = _decision_status()
+    _log("SYS", f"决策模型配置已保存：后端 {masked['backend']}"
+                f"（下一局生效），密钥"
+                f"{'已配置（尾号 ' + masked['api_key_tail'] + '）' if masked['api_key_set'] else '未配置'}。")
+    return {"ok": True, "message": "决策模型配置已保存（下一局生效）",
+            "decision": masked}
+
+
 def check_log_dir(path: str):
     path = str(path or "").strip()
     if not path:
@@ -1338,6 +1394,7 @@ def status_snapshot():
         "schedule_end": end_iso,
         "concede": cfg.get("auto_concede") or dict(DEFAULT_AUTO_CONCEDE),
         "concede_detect": _concede_detect_state(),
+        "decision": _decision_status(),
         "human_like": _current_human_like(),
         "liveness": {**_liveness_state(), **_current_liveness()},
         "liveness_alert": _liveness_state().get("alert"),
@@ -1446,6 +1503,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_save_liveness(body))
             elif path == "/api/delays":
                 self._json(api_save_delays(body))
+            elif path == "/api/decision":
+                self._json(api_save_decision(body))
             elif path == "/api/selfcheck":
                 self._json(api_selfcheck(force=True))
             else:

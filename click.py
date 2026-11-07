@@ -266,15 +266,62 @@ DISCOVER_CARD_X = {
     4: (400, 775, 1150, 1525),
 }
 
+# 拼装（37.0）选择 UI：不是「4 卡选 1」，而是「选择一项替换」——左右两个
+# 替换槽位 + 中央当前随从 + 底部「拼装」确认按钮（2026-11-07 10:10 实测帧）。
+# 实测坐标（1920x1080）：左部件 (505,495)、右部件 (1330,495)、拼装 (940,760)。
+# 4 个选择实体按 (0,1)->左、(2,3)->右 映射（随机拼装下映射误差无影响——
+# 点任意面板都是合法替换，确认后即随机拼装）。
+ASSEMBLY_POSITIONS = {
+    4: [(505, 495), (505, 495), (1330, 495), (1330, 495)],
+}
+ASSEMBLY_CONFIRM_POS = (940, 760)
 
-def choose_discover_card(choice_index, choice_count):
-    """Click a centered 1920x1080 discover choice for its layout size."""
-    assert choice_count in DISCOVER_CARD_X
-    positions = DISCOVER_CARD_X[choice_count]
+
+def _assembly_layout_from_config():
+    """ui_config 的 assembly_layout 段（热生效）：
+    {"positions": {"4": [[x, y], ...]}, "confirm": [x, y]}。"""
+    try:
+        from config import assembly_layout_settings
+        cfg = assembly_layout_settings()
+        return cfg.get("positions") or {}, cfg.get("confirm")
+    except Exception:
+        return {}, None
+
+
+def choose_discover_card(choice_index, choice_count, layout="discover"):
+    """Click a centered 1920x1080 discover/assembly choice for its layout.
+
+    layout="assembly" 的坐标来源优先级：ui_config 的 assembly_layout 段
+    （热生效，无需重启）→ 代码内置 ASSEMBLY_POSITIONS → 标准发现布局兜底。
+    拼装布局点完替换槽位后会补点「拼装」确认按钮（隐藏=放弃不点）。
+    """
+    assert layout in ("discover", "assembly")
+    positions = None
+    confirm = None
+    if layout == "assembly":
+        cfg_positions, cfg_confirm = _assembly_layout_from_config()
+        positions = cfg_positions.get(choice_count)
+        if not positions:
+            positions = ASSEMBLY_POSITIONS.get(choice_count)
+        if positions:
+            confirm = cfg_confirm or ASSEMBLY_CONFIRM_POS
+    if not positions:
+        # 无拼装布局（未量取/未配置）：整体回退标准发现点击，不带确认
+        positions = DISCOVER_CARD_X.get(choice_count)
+        assert positions, f"no layout for count {choice_count}"
+        assert 0 <= choice_index < len(positions)
+        rand_sleep(OPERATE_INTERVAL)
+        y = 540 if choice_count == 1 else 500
+        left_click(positions[choice_index], y)
+        return
     assert 0 <= choice_index < len(positions)
     rand_sleep(OPERATE_INTERVAL)
-    y = 540 if choice_count == 1 else 500
-    left_click(positions[choice_index], y)
+    point = positions[choice_index]
+    x, y = (point if isinstance(point, (tuple, list)) else (point, 495))
+    left_click(x, y)
+    if confirm:
+        rand_sleep(0.4)
+        left_click(confirm[0], confirm[1])
 
 
 STARTING_CARD_X = {

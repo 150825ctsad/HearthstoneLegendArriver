@@ -226,6 +226,36 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
     </section>
 
     <section class="card">
+      <h2 class="card-title">🧠 决策模型（实验性）</h2>
+      <label class="field">
+        <span class="field-label">决策后端</span>
+        <select id="selDecision">
+          <option value="box">盒子推荐（默认，行为与旧版一致）</option>
+          <option value="shadow">影子模式：盒子执行 + 大模型同步对比</option>
+          <option value="llm">大模型决策（失败自动回退盒子）</option>
+        </select>
+        <span class="field-hint">后端在<b>下一局开始时</b>生效；大模型/影子模式需先填 API Key</span>
+      </label>
+      <label class="field">
+        <span class="field-label">API Key（OpenAI 兼容；留空=不修改，填 - =清除）</span>
+        <input id="inpApiKey" type="password" placeholder="未配置">
+        <span class="field-hint" id="keyHint"></span>
+      </label>
+      <label class="field">
+        <span class="field-label">接口地址 / 模型</span>
+        <div class="input-row">
+          <input id="inpApiBase" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4">
+          <input id="inpModel" type="text" placeholder="glm-4-flash">
+        </div>
+        <span class="field-hint">本地模型预留：装好 Ollama 后把地址改为 http://127.0.0.1:11434/v1，模型填本地名即可</span>
+      </label>
+      <div class="btn-row">
+        <button id="btnDecision" class="btn btn-primary" type="button">💾 保存决策配置</button>
+      </div>
+      <div class="hint-line">💡 大模型只从「合法动作菜单」里选择，越界动作会被拒绝并回退盒子；密钥保存在本机 ui_config.json，请勿分享该文件。</div>
+    </section>
+
+    <section class="card">
       <h2 class="card-title">⏰ 定时任务</h2>
       <label class="field">
         <span class="field-label">开始时间</span>
@@ -550,6 +580,24 @@ function render(s){
     $("inpConcedeRounds").value = s.concede.rounds;
   }
 
+  /* 决策模型 */
+  if (s.decision){
+    $("selDecision").value = s.decision.backend || "box";
+    if (!dirtyDecision){
+      $("inpApiBase").value = s.decision.api_base || "";
+      $("inpModel").value = s.decision.model || "";
+    }
+    var keyHint = $("keyHint");
+    if (s.decision.api_key_set){
+      keyHint.className = "field-hint ok";
+      keyHint.textContent = "已配置（尾号 " + s.decision.api_key_tail + "）"
+        + (s.decision.api_key_from_env ? " —— 来自环境变量 HS_LLM_API_KEY" : "");
+    } else {
+      keyHint.className = "field-hint";
+      keyHint.textContent = "未配置：大模型/影子模式将回退盒子推荐";
+    }
+  }
+
   /* 活人感 */
   $("chkHumanLike").disabled = busy;
   $("inpHlMin").disabled = busy;
@@ -748,6 +796,33 @@ function refreshClock(){
 /* ---------- 配置 ---------- */
 $("inpName").addEventListener("input", function(){ dirty.name = true; });
 $("inpLog").addEventListener("input", function(){ dirty.log = true; });
+var dirtyDecision = false;
+$("inpApiBase").addEventListener("input", function(){ dirtyDecision = true; });
+$("inpModel").addEventListener("input", function(){ dirtyDecision = true; });
+
+function saveDecision(){
+  var payload = {
+    backend: $("selDecision").value,
+    api_base: $("inpApiBase").value.trim(),
+    model: $("inpModel").value.trim()
+  };
+  var key = $("inpApiKey").value.trim();
+  if (key) payload.api_key = key;      // 留空 = 保留原值；- = 清除
+  post("/api/decision", payload)
+    .then(function(r){
+      if (r.ok){
+        toast(r.message || "已保存", "ok");
+        dirtyDecision = false;
+        $("inpApiKey").value = "";
+      } else {
+        toast(r.error || "保存失败", "error");
+      }
+    });
+}
+$("btnDecision").addEventListener("click", saveDecision);
+$("inpApiKey").addEventListener("keydown", function(e){
+  if (e.key === "Enter") saveDecision();
+});
 $("chkConcede").addEventListener("change", function(){ dirtyConcede = true; });
 $("inpConcedeThreshold").addEventListener("input", function(){ dirtyConcede = true; });
 $("inpConcedeRounds").addEventListener("input", function(){ dirtyConcede = true; });

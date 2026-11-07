@@ -6,9 +6,12 @@ from manual_controller import (
     AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
     FRIENDLY_HAND_TARGET_CARD_IDS, LaunchStarshipAction, PlayCardAction,
     Target, TimelineAction, TradeCardAction, UseLocationAction,
+    UseMinionAbilityAction,
 )
+from json_op import card_text, is_assembly_card
 from src.recommendation_models import ActionKind
 from src.game_state.choose_one import choose_one_card_ids
+from src.game_state.old_gods import ability_card_id_by_name
 
 
 class RecommendationStateError(ValueError):
@@ -66,6 +69,8 @@ def adapt_action(proposed, state):
         adapted = _adapt_hero_power(proposed, state)
         return _with_choose_one(
             proposed, state, adapted, getattr(state, "my_hero_power", None))
+    if proposed.action == ActionKind.USE_MINION_ABILITY:
+        return _adapt_use_minion_ability(proposed, state)
     if proposed.action == ActionKind.ATTACK:
         return _adapt_attack(proposed, state)
     if proposed.action == ActionKind.USE_LOCATION:
@@ -115,9 +120,13 @@ def adapt_action(proposed, state):
                 or proposed.source.owner != "friendly"
                 or not 1 <= proposed.source.index <= choice_count):
             raise RecommendationStateError("discover_slot_out_of_range")
+        # 拼装选择 UI（来源卡文字含「拼装」）的卡牌位置与标准发现界面不同，
+        # 布局随动作传给点击层。
+        source_card = getattr(state, "discover_choice_source_card_id", None)
+        layout = "assembly" if is_assembly_card(source_card) else "discover"
         return AdaptedAction(
             DiscoverChoiceAction(
-                proposed.source.index - 1, choice_count),
+                proposed.source.index - 1, choice_count, layout=layout),
             None, None, "choice_resolved")
     if proposed.action == ActionKind.END_TURN:
         return AdaptedAction(EndTurnAction(), None, None, "turn_changed")
@@ -202,6 +211,22 @@ def _adapt_play_card(proposed, state):
                 target_id = getattr(hero, "entity_id", None)
                 manual_target = Target(
                     proposed.target.owner, "hero", None, target_id)
+            elif proposed.target.kind == "location_slot":
+                # 地标目标（如拆迁修理工「摧毁一个敌方地标」）：只有卡牌
+                # 文字提到「地标」才允许（防误点不指向地标的牌）。
+                if "地标" not in card_text(getattr(card, "card_id", "")):
+                    raise RecommendationStateError(
+                        f"{target_error}_not_location_card")
+                entry = board_slot(
+                    state, proposed.target.owner, proposed.target.index)
+                if entry.kind != "location":
+                    raise RecommendationStateError("target_not_location")
+                target_id = getattr(entry.entity, "entity_id", None)
+                row_index = int(getattr(entry.entity, "zone_pos", 0)) - 1
+                if row_index < 0:
+                    raise RecommendationStateError("target_position_unknown")
+                manual_target = Target(
+                    proposed.target.owner, "location", row_index, target_id)
             elif proposed.target.kind == "board_slot":
                 target = board_slot(
                     state, proposed.target.owner, proposed.target.index)
@@ -236,35 +261,91 @@ def _adapt_trade_card(proposed, state):
         manual, entity_id, None, "hand_card_left")
 
 
+def _resolve_board_or_hero_target(target_ref, state, error_prefix):
+    """把 目标是… 引用绑定到实体（英雄/随从/地标）；多个动作类型共用。
+
+    location_slot（地标目标）按战场排位（zone_pos）绑定——地标在场面行里
+    占一个位置，点击坐标与随从同一套排位计算。
+    """
+    if target_ref is None:
+        return None, None
+    side = target_ref.owner
+    if side not in {"friendly", "enemy"}:
+        raise RecommendationStateError(f"{error_prefix}_unsupported")
+    if target_ref.kind == "hero":
+        hero = (getattr(state, "my_hero", None)
+                if side == "friendly"
+                else getattr(state, "oppo_hero", None))
+        if hero is None:
+            raise RecommendationStateError(f"{error_prefix}_missing")
+        entity_id = getattr(hero, "entity_id", None)
+        return Target(side, "hero", None, entity_id), entity_id
+    if target_ref.kind == "location_slot":
+        entry = board_slot(state, side, target_ref.index)
+        if entry.kind != "location":
+            raise RecommendationStateError("target_not_location")
+        entity_id = getattr(entry.entity, "entity_id", None)
+        row_index = int(getattr(entry.entity, "zone_pos", 0)) - 1
+        if row_index < 0:
+            raise RecommendationStateError("target_position_unknown")
+        return Target(side, "location", row_index, entity_id), entity_id
+    if target_ref.kind == "board_slot":
+        entry = board_slot(state, side, target_ref.index)
+        if entry.kind != "minion":
+            raise RecommendationStateError("target_not_minion")
+        entity_id = getattr(entry.entity, "entity_id", None)
+        return Target(side, "minion", entry.collection_index,
+                      entity_id), entity_id
+    raise RecommendationStateError(f"{error_prefix}_unsupported")
+
+
 def _adapt_hero_power(proposed, state):
     power = getattr(state, "my_hero_power", None)
-    target = None
-    target_id = None
-    if proposed.target is not None:
-        side = proposed.target.owner
-        if side not in {"friendly", "enemy"}:
-            raise RecommendationStateError("hero_power_target_unsupported")
-        if proposed.target.kind == "hero":
-            hero = (getattr(state, "my_hero", None)
-                    if side == "friendly"
-                    else getattr(state, "oppo_hero", None))
-            if hero is None:
-                raise RecommendationStateError("hero_power_target_missing")
-            target_id = getattr(hero, "entity_id", None)
-            target = Target(side, "hero", None, target_id)
-        elif proposed.target.kind == "board_slot":
-            entry = board_slot(state, side, proposed.target.index)
-            if entry.kind != "minion":
-                raise RecommendationStateError("target_not_minion")
-            target_id = getattr(entry.entity, "entity_id", None)
-            target = Target(
-                side, "minion", entry.collection_index, target_id)
-        else:
-            raise RecommendationStateError("hero_power_target_unsupported")
+    target, target_id = _resolve_board_or_hero_target(
+        proposed.target, state, "hero_power_target")
     return AdaptedAction(
         HeroPowerAction(target=target),
         getattr(power, "entity_id", None), target_id,
         "hero_power_changed")
+
+
+def _adapt_use_minion_ability(proposed, state):
+    """古神/类泰坦技能：点随从弹技能菜单 → 按定义序点选技能卡（可带目标）。
+
+    技能菜单在 Power.log 里静默，技能名→按钮序号依赖：
+      1. cards.json 把技能名反查成子卡 cardId（恩佐斯的召唤 → BE_017t3）；
+      2. StrategyState.minion_abilities 里该古神的技能表（按 tN 升序 =
+         游戏菜单按钮的排列序，与泰坦时代一致）。
+    """
+    if (proposed.source is None
+            or proposed.source.kind != "board_slot"
+            or proposed.source.owner != "friendly"):
+        raise RecommendationStateError("ability_source_unsupported")
+    entry = board_slot(state, "friendly", proposed.source.index)
+    if entry.kind != "minion":
+        raise RecommendationStateError("source_not_minion")
+    minion = entry.entity
+    has_ability_tags = bool(getattr(minion, "has_minion_abilities", False))
+    ability_order = tuple(getattr(state, "minion_abilities", {}).get(
+        getattr(minion, "card_id", ""), ()))
+    if not has_ability_tags and not ability_order:
+        raise RecommendationStateError("source_not_old_god")
+    choice_name = getattr(proposed, "choice_name", None)
+    if not choice_name:
+        raise RecommendationStateError("choose_one_name_required")
+    ability_card_id = ability_card_id_by_name(choice_name)
+    if ability_card_id is None or ability_card_id not in ability_order:
+        raise RecommendationStateError("ability_name_unresolvable")
+    ability_index = ability_order.index(ability_card_id)
+    target, target_id = _resolve_board_or_hero_target(
+        proposed.target, state, "ability_target")
+    manual = UseMinionAbilityAction(
+        entry.collection_index, getattr(minion, "card_id", ""),
+        ability_index, len(ability_order),
+        minion_entity_id=getattr(minion, "entity_id", None),
+        target=target)
+    return AdaptedAction(manual, getattr(minion, "entity_id", None),
+                         target_id, "minion_ability_used")
 
 
 def _adapt_attack(proposed, state):

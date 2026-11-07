@@ -16,6 +16,10 @@ class ActionKind(str, Enum):
     END_TURN = "end_turn"
     TIMELINE_UNDO = "timeline_undo"
     TIMELINE_KEEP = "timeline_keep"
+    # 古神/类泰坦技能（37.0《黑暗帝国的统治》）：盒子用
+    # 「操作N号位随从攻击 + 选择卡牌/技能名」表达，点击随从弹技能菜单后
+    # 按位置点选技能卡。
+    USE_MINION_ABILITY = "use_minion_ability"
 
 
 @dataclass(frozen=True)

@@ -161,6 +161,7 @@ class HeroPowerAction:
 class DiscoverChoiceAction:
     choice_index: int
     choice_count: int
+    layout: str = "discover"      # discover=标准发现 | assembly=拼装(37.0)
     turn_number: Optional[int] = None
 
 
@@ -185,6 +186,22 @@ class LaunchStarshipAction:
     starship_index: int
     card_id: str
     starship_entity_id: Optional[str] = None
+    turn_number: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class UseMinionAbilityAction:
+    """古神/类泰坦技能（37.0）：点开随从技能菜单，按定义序点选技能卡。
+
+    ability_index/ability_count 是"菜单里第几个技能"（0 基），由适配层用
+    技能子卡 cardId 的 tN 排序推定（菜单在 Power.log 里静默）。
+    """
+    minion_index: int
+    card_id: str
+    ability_index: int
+    ability_count: int
+    minion_entity_id: Optional[str] = None
+    target: Optional[Target] = None
     turn_number: Optional[int] = None
 
 
@@ -225,6 +242,7 @@ ManualAction = Union[
     UseLocationAction,
     AttackAction,
     LaunchStarshipAction,
+    UseMinionAbilityAction,
     EndTurnAction,
     RefreshAction,
     TimelineAction,
@@ -267,6 +285,7 @@ class ClickExecutor:
             if target.kind == "hero":
                 self.click.choose_my_hero()
             else:
+                # 随从与地标同占战场排位，点击坐标同一套计算
                 self.click.choose_my_minion(target.index, my_count)
         elif target.kind == "hero":
             self.click.choose_oppo_hero()
@@ -302,8 +321,11 @@ class ClickExecutor:
                                   if hand_index < target.index
                                   else target.index)
                 self.click.choose_card(adjusted_index, hand_count - 1)
-            elif (target.side == "friendly" and target.kind == "minion"
+            elif (target.side == "friendly"
+                  and target.kind in ("minion", "location")
                   and target.index >= gap_index):
+                # 己方目标在落点之后：随从落场后战场排位整体后移一位
+                # （地标同样占排位，目标行坐标需 +1）
                 adjusted = Target(
                     target.side, target.kind, target.index + 1,
                     target.entity_id)
@@ -380,6 +402,28 @@ class ClickExecutor:
             starship_screen_index, board_count)
         self.click.click_launch_starship()
 
+    def use_minion_ability(self, minion_screen_index, board_count,
+                           ability_index, ability_count, target,
+                           my_board_count, oppo_board_count):
+        return self._safe_action(lambda: self._use_minion_ability(
+            minion_screen_index, board_count, ability_index, ability_count,
+            target, my_board_count, oppo_board_count))
+
+    def _use_minion_ability(self, minion_screen_index, board_count,
+                            ability_index, ability_count, target,
+                            my_board_count, oppo_board_count):
+        # 点古神 → 技能菜单弹出（游戏侧动画，日志静默）→ 按定义序点技能卡
+        # → 目标型技能再点目标。菜单布局沿用发现的居中 1~4 选项坐标
+        # （DISCOVER_CARD_X）；若实测菜单位置不同，在 click.py 里加专用布局。
+        self.click.choose_my_board_entity(
+            minion_screen_index, board_count)
+        self.sleep(0.6)          # 等技能菜单动画完成
+        self.click.choose_discover_card(ability_index, ability_count)
+        if target is not None:
+            self.sleep(0.4)      # 等目标选择 UI 就绪
+            self._click_target(target, my_board_count, oppo_board_count)
+        self.click.cancel_click()
+
     def play_weapon(self, hand_index, hand_count):
         return self._safe_action(
             lambda: self._play_weapon(hand_index, hand_count))
@@ -422,10 +466,11 @@ class ClickExecutor:
             self.sleep(0.3)
             self.click.choose_discover_card(choice.choice_index, choice.choice_count)
 
-    def choose_discover_card(self, choice_index, choice_count):
+    def choose_discover_card(self, choice_index, choice_count,
+                             layout="discover"):
         return self._safe_action(
             lambda: self.click.choose_discover_card(
-                choice_index, choice_count))
+                choice_index, choice_count, layout=layout))
 
     def attack(self, attacker, target, my_count, oppo_count):
         return self._safe_action(
@@ -734,7 +779,20 @@ class ManualController:
             return (target.entity_id is None
                     or getattr(collection[target.index], "entity_id", None)
                     == target.entity_id)
-        if target.kind != "minion" or target.index is None:
+        if target.kind != "minion" and target.kind != "location":
+            return False
+        if target.kind == "location":
+            # 地标目标：index 是战场排位（0 基），实体按 entity_id 校验
+            if target.index is None:
+                return False
+            collection = (state.my_locations
+                          if target.side == "friendly"
+                          else getattr(state, "oppo_locations", [])
+                          if target.side == "enemy" else [])
+            return (target.entity_id is None
+                    or any(getattr(entry, "entity_id", None)
+                           == target.entity_id for entry in collection))
+        if target.index is None:
             return False
         collection = (state.my_minions if target.side == "friendly"
                       else state.oppo_minions if target.side == "enemy"
@@ -904,7 +962,8 @@ class ManualController:
                     or not 0 <= action.choice_index < action.choice_count):
                 return self._reject("发现选项位置已经失效，未执行操作。")
             self.executor.choose_discover_card(
-                action.choice_index, action.choice_count)
+                action.choice_index, action.choice_count,
+                layout=getattr(action, "layout", "discover"))
             return ActionExecutionResult(
                 True, f"已选择发现选项：{action.choice_index + 1}号位")
 
@@ -953,6 +1012,38 @@ class ManualController:
                 return self._reject("星舰战场位置已经失效，未执行发射。")
             self.executor.launch_starship(zone_pos - 1, board_count)
             return ActionExecutionResult(True, "已发射星舰。")
+
+        if isinstance(action, UseMinionAbilityAction):
+            if not 0 <= action.minion_index < len(state.my_minions):
+                return self._reject("随从位置已经失效，未执行技能。")
+            minion = state.my_minions[action.minion_index]
+            if minion.card_id != action.card_id:
+                return self._reject("随从内容已经变化，未执行技能。")
+            if (action.minion_entity_id is not None
+                    and getattr(minion, "entity_id", None)
+                    != action.minion_entity_id):
+                return self._reject("随从对象已经变化，未执行技能。")
+            zone_pos = getattr(minion, "zone_pos", 0)
+            board_count = self._board_slot_count(state, "friendly")
+            if not 1 <= zone_pos <= board_count:
+                return self._reject("随从战场位置已经失效，未执行技能。")
+            if (action.ability_count not in (1, 2, 3, 4)
+                    or not 0 <= action.ability_index < action.ability_count):
+                return self._reject("技能序号已经失效，未执行技能。")
+            if action.target is not None and not self._target_exists(
+                    action.target, state):
+                return self._reject("技能目标已经不存在，未执行技能。")
+            self.executor.use_minion_ability(
+                zone_pos - 1, board_count,
+                action.ability_index, action.ability_count,
+                self._target_for_click(action.target, state)
+                if action.target is not None else None,
+                board_count,
+                self._board_slot_count(state, "enemy"),
+            )
+            return ActionExecutionResult(
+                True, f"已使用{minion.name}技能（{action.ability_index + 1}"
+                      f"/{action.ability_count}）。")
 
         if isinstance(action, AttackAction):
             if not self._target_exists(action.attacker, state):

@@ -72,6 +72,8 @@ class LogState:
         self.general_choice_player = None
         self.general_choice_indexes = set()
         self.general_choice_ready = False
+        # 选择 UI 的来源卡 cardId（拼装卡/发现卡），用于区分点击布局。
+        self.general_choice_source_card_id = None
         self.power_options = {}
         self.current_power_option_id = None
         # 手牌入口计数（上游逻辑：用于手牌动画延迟判断）。
@@ -177,6 +179,7 @@ class LogState:
         self.general_choice_player = None
         self.general_choice_indexes = set()
         self.general_choice_ready = False
+        self.general_choice_source_card_id = None
 
     def flush(self):
         revision = self.revision
@@ -250,6 +253,15 @@ class CardEntity(Entity):
                super().__str__()
 
     def generate_strategy_entity(self, log_state, entity_id=None):
+        ability_tag_keys = [
+            key for key in self.tag_dict
+            if key.startswith("ACTIVATABLE_MINION_ABILITY_USED_")]
+        minion_kwargs = {
+            "has_minion_abilities": int(bool(ability_tag_keys)),
+            "minion_abilities_used": sum(
+                1 for key in ability_tag_keys
+                if str(self.tag_dict.get(key)) == "1"),
+        }
         if self.cardtype == "MINION":
             return StrategyMinion(
                 entity_id=entity_id,
@@ -283,6 +295,7 @@ class CardEntity(Entity):
                 exhausted=int(self.query_tag("EXHAUSTED")),
                 cant_attack=int(self.query_tag("CANT_ATTACK")),
                 num_turns_in_play=int(self.query_tag("NUM_TURNS_IN_PLAY")),
+                **minion_kwargs,
             )
         elif self.cardtype == "SPELL":
             return StrategySpell(
@@ -422,6 +435,13 @@ def update_state(state, line_info_container):
         if (state.general_choice_id
                 == line_info_container.info_dict["choice_id"]):
             state.clear_general_choice()
+
+    if line_info_container.line_type == LOG_LINE_GENERAL_CHOICE_SOURCE:
+        # 选择 UI 的来源卡（拼装卡/发现卡）。块内 Source 行紧跟 id= 头行，
+        # 选择未中途变更（general_choice_id 仍在）才采纳。
+        if state.general_choice_id is not None:
+            state.general_choice_source_card_id = (
+                line_info_container.info_dict["card_id"] or None)
 
     if line_info_container.line_type == LOG_LINE_GAME_ENTITY:
         game_entity = GameEntity()

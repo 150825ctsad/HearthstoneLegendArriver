@@ -1,8 +1,12 @@
 """Build a user-facing game snapshot from parsed Power.log state."""
 
+import re
+
 from constants.constants import DEBUG_PRINT
 from print_info import debug_print
-from copy import deepcopy
+
+# 古神/类泰坦的技能子卡命名（实测 BE_017 的技能为 BE_017t3~t6）。
+_ABILITY_CARD_ID_RE = re.compile(r"^(.+)t(\d+)$")
 
 
 class StrategyState:
@@ -28,9 +32,21 @@ class StrategyState:
         self.oppo_hero_power = None
         self.oppo_weapon = None
         self.oppo_hand_card_num = 0
+        self.my_deck_num = 0
+        self.oppo_deck_num = 0
         self.discover_choice_count = log_state.discover_choice_count
+        # 打开中的选择 UI 的来源卡（拼装卡/发现卡），供点击布局判定。
+        self.discover_choice_source_card_id = (
+            getattr(log_state, "general_choice_source_card_id", None)
+            if self.discover_choice_count else None)
         self.my_player_id = log_state.my_player_id
-        self.power_options = deepcopy(log_state.power_options)
+        # 结构化两层拷贝（键与 info/choices 的值都是不可变的字符串/数字）。
+        # deepcopy 会对每个小 dict 走一套 memo 机制，快照在每次日志 revision
+        # 变化时都重建，这里是可观的固定开销；两层浅拷贝语义完全等价。
+        self.power_options = {
+            entity_id: {**option, "choices": dict(option.get("choices") or {})}
+            for entity_id, option in log_state.power_options.items()
+        }
         self.hand_entry_count = log_state.hand_entry_count
         self.start_of_game_card_count = getattr(
             log_state, "start_of_game_card_count", 0)
@@ -72,6 +88,11 @@ class StrategyState:
                 elif entity.cardtype == "LOCATION":
                     (self.my_locations if mine
                      else self.oppo_locations).append(converted)
+            elif entity.query_tag("ZONE") == "DECK":
+                if log_state.is_my_entity(entity):
+                    self.my_deck_num += 1
+                else:
+                    self.oppo_deck_num += 1
             elif entity.query_tag("ZONE") == "GRAVEYARD":
                 (self.my_graveyard if log_state.is_my_entity(entity)
                  else self.oppo_graveyard).append(entity)
@@ -81,6 +102,39 @@ class StrategyState:
         self.my_hand_cards.sort(key=lambda item: item.zone_pos)
         self.my_locations.sort(key=lambda item: item.zone_pos)
         self.oppo_locations.sort(key=lambda item: item.zone_pos)
+        self.minion_abilities = self._collect_minion_abilities(log_state)
+
+    @staticmethod
+    def _collect_minion_abilities(log_state):
+        """我方随从的古神技能表：{随从card_id: 按子卡 tN 升序的技能 cardId 元组}。
+
+        技能实体在打出古神时以 SETASIDE 注册（实测 恩佐斯 BE_017 的
+        BE_017t3~t6）。技能菜单在 Power.log 里完全静默（无 Options/Choices
+        事件），技能名→按钮序号只能靠子卡定义序推定：游戏 UI 的技能按钮按
+        tN 升序排列（与泰坦时代 TTN_xxx t1..t3 的行为一致）。
+        """
+        my_minions = [
+            entity for entity in log_state.entity_dict.values()
+            if entity.cardtype == "MINION"
+            and entity.query_tag("ZONE") == "PLAY"
+            and log_state.is_my_entity(entity)]
+        my_card_ids = {entity.card_id for entity in my_minions}
+        grouped: dict = {}
+        for entity in log_state.entity_dict.values():
+            if entity.query_tag("ZONE") != "SETASIDE":
+                continue
+            if not log_state.is_my_entity(entity):
+                continue
+            match = _ABILITY_CARD_ID_RE.match(
+                getattr(entity, "card_id", "") or "")
+            if match is None or match.group(1) not in my_card_ids:
+                continue
+            grouped.setdefault(match.group(1), set()).add(int(match.group(2)))
+        return {
+            card_id: tuple(f"{card_id}t{number}"
+                           for number in sorted(numbers))
+            for card_id, numbers in grouped.items()
+        }
 
     @property
     def my_last_mana(self):

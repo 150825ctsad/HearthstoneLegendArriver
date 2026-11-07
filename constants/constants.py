@@ -59,6 +59,7 @@ LOG_LINE_POWER_SUBOPTION = "Power SubOption"
 LOG_LINE_GENERAL_CHOICE_ENTITY = "General Choice Entity"
 LOG_LINE_GENERAL_CHOICE_READY = "General Choice Ready"
 LOG_LINE_GENERAL_CHOICE_RESOLVED = "General Choice Resolved"
+LOG_LINE_GENERAL_CHOICE_SOURCE = "General Choice Source"
 LOG_LINE_BLOCK_START_TRIGGER = "Block Start Trigger"
 
 CARD_BASE = "BASE"

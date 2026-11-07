@@ -11,6 +11,7 @@ import click
 import get_screen
 from config import (
     DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL, human_like_settings,
+    discover_fallback_settings, decision_settings, load_ui_config,
 )
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
@@ -23,6 +24,10 @@ from src.flow.mulligan_flow import MulliganFlow, MulliganStatus
 from src.flow.recommendation_flow import (
     FlowStepStatus, RecommendationFlow,
 )
+from src.brain.decision_flow import (
+    LlmDecisionFlow, ShadowDecider, llm_mulligan_proposal,
+)
+from src.brain.llm_client import make_client
 from src.game_state.recommendation_adapter import adapt_action
 from src.ocr.paddle_adapter import PaddleOcrAdapter
 from src.ocr.stable_reader import StableRecommendationReader
@@ -63,6 +68,12 @@ active_game_generation = -1
 mulligan_delay_generation = None
 player_turn_delay_key = None
 last_automation_diagnostic = None
+# 决策后端（box|shadow|llm，见 config.DEFAULT_DECISION）：llm=模型决策+盒子
+# 回退；shadow=盒子决策执行+LLM 同步记录倾向做对比。均每局初始化时读取。
+_decision_backend = "box"
+_llm_client = None
+_shadow_decider = None
+_history_block = ""
 _snapshot_cache_key = None
 _snapshot_cache = None
 _mulligan_diagnostic_key = None
@@ -114,6 +125,7 @@ def initialize_recommendation_automation():
     global recommendation_config, recommendation_capture
     global recommendation_parser, recommendation_reader
     global mulligan_reader, recommendation_validator
+    global _shadow_decider, _llm_client, _decision_backend, _history_block
 
     # 轻量：每次都重建，以便拾取校准后的最新 ROI / 尺寸配置。
     recommendation_config = RecommendationConfig()
@@ -142,9 +154,27 @@ def initialize_recommendation_automation():
         recommendation_validator = RecommendationValidator(
             recommendation_config)
 
+    # 决策点采集器（案例库/行为克隆数据源，纯本地记录不影响对局）
+    from src.brain.decision_recorder import DecisionRecorder
+    recorder = DecisionRecorder(
+        enabled=bool(decision_settings().get("record_data", True)))
+
     def read_mulligan_action():
         # 换牌面板是否在场，由 OCR 证据裁定：识别出的文本必须能解析出
         # `替换N号位卡牌` 换牌句式（无"打法参考A"信标的专用 reader）。
+        # llm 后端：留牌先问模型（一局一次的高价值决策），失败回退 OCR。
+        if _decision_backend == "llm" and _llm_client is not None:
+            try:
+                snapshot = refresh_snapshot()
+                if snapshot is not None:
+                    proposal = llm_mulligan_proposal(
+                        snapshot, _llm_client,
+                        log_state.game_num_turns_in_play, log_state.revision,
+                        history_block=_history_block)
+                    if proposal.action == ActionKind.MULLIGAN:
+                        return proposal
+            except Exception:
+                pass
         evidence = mulligan_reader.read(
             lambda: recommendation_capture.capture(ocr_panel_ok=True),
             recommendation_capture.crop_recommendation)
@@ -178,7 +208,55 @@ def initialize_recommendation_automation():
             recommendation_config.draw_extra_delay_per_card_seconds),
         post_action_pause=_human_like_post_action_pause,
         stopped=shutdown_event.is_set,
+        # 拼装/发现随机兜底：盒子推荐长时间不可读时随机点一个合法选项
+        #（ui_config.json 的 discover_fallback 段可调，默认开、连续 4 次）。
+        discover_random_fallback=bool(
+            discover_fallback_settings()["enabled"]),
+        discover_random_fallback_attempts=int(
+            discover_fallback_settings()["attempts"]),
+        recorder=recorder,
     )
+
+    # ------------------------------------------------------------ 决策后端
+    _decision_backend = decision_settings()["backend"]
+    _shadow_decider = None
+    _llm_client = None
+    if _decision_backend in ("llm", "shadow"):
+        _llm_client = make_client(decision_settings())
+        if not _llm_client.api_key:
+            warn_print("HS_LLM_API_KEY 未设置：LLM 决策将始终回退盒子流程。")
+        # 近期对战经验块（每局构建一次，供 LLM 上下文学习；失败不影响对局）
+        try:
+            from src.brain.battle_history import (
+                build_all_digests, render_history_block, save_history,
+            )
+            games = build_all_digests(HEARTHSTONE_LOG_ROOT)
+            save_history(games)
+            _history_block = render_history_block(games)
+        except Exception as exc:
+            _history_block = ""
+            warn_print(f"对战历史摘要构建失败（不影响运行）：{exc}")
+    if _decision_backend == "llm":
+        recommendation_flow = LlmDecisionFlow(
+            client=_llm_client,
+            state_supplier=_automation_state_with_revision,
+            adapter=adapt_action,
+            controller=manual_controller,
+            box_flow=recommendation_flow,      # 兜底：API/解码失败回退盒子
+            sleep=time.sleep,
+            stopped=shutdown_event.is_set,
+            post_action_delay=(
+                recommendation_config.post_action_delay_seconds),
+            post_action_pause=_human_like_post_action_pause,
+            draw_extra_delay_per_card=(
+                recommendation_config.draw_extra_delay_per_card_seconds),
+            history_block=_history_block,
+            recorder=recorder,
+        )
+    elif _decision_backend == "shadow":
+        _shadow_decider = ShadowDecider(
+            _llm_client, _automation_state_with_revision,
+            history_block=_history_block)
 
 
 def _human_like_post_action_pause() -> bool:
@@ -239,6 +317,7 @@ def init():
     global _concede_last_rate, _concede_last_check
     global _name_match_result, _name_match_reported
     global _liveness_alert, _ocr_fail_streak
+    global _shadow_decider, _llm_client, _decision_backend, _history_block
 
     log_state = LogState()
     log_iter = log_iter_func(HEARTHSTONE_LOG_ROOT)
@@ -258,6 +337,10 @@ def init():
     _name_match_result = None
     _name_match_reported = None
     _liveness_alert = None
+    _shadow_decider = None
+    _llm_client = None
+    _decision_backend = "box"
+    _history_block = ""
     _ocr_fail_streak = 0
     # 存活检测按“本轮自动化”重新开始计数：本轮没见过的炉石进程不算“消失”，
     # 否则“启动脚本 → 脚本拉起炉石”的正常流程会被误判成闪退。
@@ -845,12 +928,13 @@ def concede_detection_state() -> dict:
 
 
 def _load_concede_config():
-    """读取自动投降配置（ui_config.json 的 auto_concede 段）。"""
+    """读取自动投降配置（ui_config.json 的 auto_concede 段）。
+
+    读盘走 config 的 stat 缓存：我方回合每次出牌步骤与网页/浮窗轮询都会
+    调到这里，配置文件没变时不重复读盘解析。
+    """
     try:
-        import json
-        from pathlib import Path
-        p = Path(__file__).resolve().parent / "ui_config.json"
-        ac = json.loads(p.read_text(encoding="utf-8")).get("auto_concede") or {}
+        ac = load_ui_config().get("auto_concede") or {}
         return {
             "enabled": bool(ac.get(
                 "enabled", DEFAULT_AUTO_CONCEDE["enabled"])),
@@ -1015,6 +1099,12 @@ def run_automatic_battle_step():
         _sleep_with_delay(delay, label)
         manual_controller.output(
             f"[SYS] 回合 {turn} 延时结束，开始本轮推荐读取。")
+    # 影子模式：盒子决策前，让 LLM 对同一状态给出倾向并落日志（对比评估）。
+    if _decision_backend == "shadow" and _shadow_decider is not None:
+        try:
+            _shadow_decider.observe()
+        except Exception:
+            pass
     if recommendation_flow is None:
         return run_manual_battle_step()
 
