@@ -28,27 +28,37 @@ class LlmClient:
         self._post = post
 
     def decide(self, system_prompt, user_prompt):
-        """一轮对话补全，返回模型文本；任何失败抛 LlmUnavailableError。"""
+        """一轮对话补全，返回模型文本；任何失败抛 LlmUnavailableError。
+
+        推理型模型（deepseek-flash/reasoner 等）的思考链计入 max_tokens，
+        若响应以 finish_reason=length 截断（答案没写完），自动把
+        max_tokens 加倍重试一次——否则截断的 JSON 会让解析层全部失败
+        （实测 deepseek-flash 一次决策思考即消耗 100-500 tokens）。
+        """
+        import json
+
         if not self.api_key:
             raise LlmUnavailableError("no_api_key（请设置环境变量 "
                                       "HS_LLM_API_KEY）")
         if not self.api_base or not self.model:
             raise LlmUnavailableError("api_base/model 未配置")
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0,
-            "max_tokens": self.max_tokens,
-        }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
         url = f"{self.api_base}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}",
                    "Content-Type": "application/json"}
-        attempts = 1 + max(0, self.max_retries)
+        attempts = 1 + max(0, self.max_retries) + 1
+        max_tokens = self.max_tokens
         last_error = None
         for _ in range(attempts):
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": max_tokens,
+            }
             try:
                 status, body = self._post(url, payload, timeout=self.timeout,
                                           headers=headers)
@@ -59,12 +69,19 @@ class LlmClient:
                 last_error = f"http_{status}: {body[:120]}"
                 continue
             try:
-                import json
                 data = json.loads(body)
-                return str(
-                    data["choices"][0]["message"]["content"] or "")
+                choice = data["choices"][0]
+                text = str(choice["message"]["content"] or "")
             except Exception as exc:
                 last_error = f"bad_response: {exc}"
+                continue
+            if str(choice.get("finish_reason") or "") == "length":
+                # 答案被长度截断（推理型模型思考链计入 max_tokens）：
+                # 加倍上限重试一次，计费按实际用量、上限抬高不多花钱
+                max_tokens *= 2
+                last_error = "finish_reason_length"
+                continue
+            return text
         raise LlmUnavailableError(last_error or "unknown")
 
 

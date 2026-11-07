@@ -1,34 +1,37 @@
-[11:18:38 DEBUG] 当前状态为：+Choosing Hero
-[11:18:42 DEBUG] 当前状态为：+Match Opponent
-[11:19:05 DEBUG] 当前状态为：+Choosing Card
-[11:19:40 DEBUG] 当前状态为：+Battling
-[11:22:14 DEBUG] 当前状态为：+Quitting Battle
-[11:22:35 DEBUG] 当前状态为：+Choosing Hero
-[11:22:39 DEBUG] 当前状态为：+Match Opponent
-[11:22:59 DEBUG] 当前状态为：+Choosing Card
-[11:23:26 DEBUG] 当前状态为：+Battling
-[11:28:04 DEBUG] 当前状态为：+Quitting Battle
-[11:28:38 DEBUG] 当前状态为：+Choosing Hero
-[11:28:42 DEBUG] 当前状态为：+Match Opponent
-[11:28:55 DEBUG] 当前状态为：+Choosing Card
-[11:29:21 DEBUG] 当前状态为：+Battling
-[11:32:39 DEBUG] 当前状态为：+Quitting Battle
-[11:33:07 DEBUG] 当前状态为：+Choosing Hero
-[11:33:11 DEBUG] 当前状态为：+Match Opponent
-[11:33:24 DEBUG] 当前状态为：+Choosing Card
-[11:33:48 DEBUG] 当前状态为：+Battling
-[11:36:02 DEBUG] 当前状态为：+Quitting Battle
-[11:36:20 DEBUG] 当前状态为：+Choosing Hero
-[11:36:24 DEBUG] 当前状态为：+Match Opponent
-[11:36:37 DEBUG] 当前状态为：+Choosing Card
-[11:37:07 DEBUG] 当前状态为：+Battling
-[11:41:50 DEBUG] 当前状态为：+Quitting Battle
-[11:42:11 DEBUG] 当前状态为：+Choosing Hero
-[11:42:15 DEBUG] 当前状态为：+Match Opponent
-[11:42:29 DEBUG] 当前状态为：+Choosing Card
-[11:43:04 DEBUG] 当前状态为：+Battling
-[11:49:06 DEBUG] 当前状态为：+Quitting Battle
-[11:49:45 DEBUG] 当前状态为：+Choosing Hero
-[11:49:49 DEBUG] 当前状态为：+Match Opponent
-[11:50:09 DEBUG] 当前状态为：+Choosing Card
-[11:50:43 DEBUG] 当前状态为：+Battling
+[18:35:09 DEBUG] 当前状态为：+Choosing Card
+[18:35:27 DEBUG] 当前状态为：+Battling
+[18:43:34 DEBUG] 当前状态为：+Quitting Battle
+[18:43:51 DEBUG] 当前状态为：+Choosing Hero
+[18:43:55 DEBUG] 当前状态为：+Match Opponent
+[18:44:11 DEBUG] 当前状态为：+Choosing Card
+[18:44:36 DEBUG] 当前状态为：+Battling
+[18:52:06 DEBUG] 当前状态为：+Quitting Battle
+[18:52:35 DEBUG] 当前状态为：+Choosing Hero
+[18:52:39 DEBUG] 当前状态为：+Match Opponent
+[18:52:57 DEBUG] 当前状态为：+Choosing Card
+[18:53:21 DEBUG] 当前状态为：+Battling
+[19:00:51 DEBUG] 当前状态为：+Quitting Battle
+[19:01:08 DEBUG] 当前状态为：+Choosing Hero
+[19:01:12 DEBUG] 当前状态为：+Match Opponent
+[19:01:29 DEBUG] 当前状态为：+Choosing Card
+[19:01:53 DEBUG] 当前状态为：+Battling
+[19:16:29 DEBUG] 当前状态为：+Quitting Battle
+[19:16:50 DEBUG] 当前状态为：+Choosing Hero
+[19:16:54 DEBUG] 当前状态为：+Match Opponent
+[19:17:08 DEBUG] 当前状态为：+Choosing Card
+[19:17:32 DEBUG] 当前状态为：+Battling
+[19:23:44 DEBUG] 当前状态为：+Quitting Battle
+[19:24:04 DEBUG] 当前状态为：+Choosing Hero
+[19:24:08 DEBUG] 当前状态为：+Match Opponent
+[19:24:26 DEBUG] 当前状态为：+Choosing Card
+[19:24:56 DEBUG] 当前状态为：+Battling
+[19:39:12 DEBUG] 当前状态为：+Quitting Battle
+[19:39:40 DEBUG] 当前状态为：+Choosing Hero
+[19:39:45 DEBUG] 当前状态为：+Match Opponent
+[19:40:01 DEBUG] 当前状态为：+Choosing Card
+[19:40:26 DEBUG] 当前状态为：+Battling
+[19:45:11 DEBUG] 当前状态为：+Quitting Battle
+[19:45:31 DEBUG] 当前状态为：+Choosing Hero
+[19:45:35 DEBUG] 当前状态为：+Match Opponent
+[19:45:53 DEBUG] 当前状态为：+Choosing Card
+[19:46:17 DEBUG] 当前状态为：+Battling

@@ -262,7 +262,10 @@ DEFAULT_DECISION = {
     "api_key": "",
     "timeout_seconds": 8.0,
     "max_retries": 1,
-    "max_tokens": 200,
+    # 注意：推理型模型（deepseek-flash/reasoner 等）的思考链也计入
+    # max_tokens——实际答案在思考之后输出，上限太低会把 JSON 截断
+    # （实测 deepseek-flash 一次决策思考约 100-500 tokens）。1200 足够。
+    "max_tokens": 1200,
     # 决策点采集（案例库/行为克隆数据源）：每次实际执行的决策写入
     # logs/training_data.jsonl。默认开（纯本地记录，不影响对局）。
     "record_data": True,

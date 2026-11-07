@@ -342,7 +342,7 @@ class ShadowDeciderTests(unittest.TestCase):
 
 class LlmClientTests(unittest.TestCase):
     def test_missing_key_raises_unavailable(self):
-        client = LlmClient(dict(DEFAULT_DECISION), api_key="")
+        client = LlmClient(dict(config.DEFAULT_DECISION), api_key="")
         with self.assertRaises(LlmUnavailableError):
             client.decide("sys", "user")
 
@@ -355,11 +355,31 @@ class LlmClientTests(unittest.TestCase):
                 return 500, "boom"
             return 200, '{"choices":[{"message":{"content":"{\\"action\\": \\"end_turn\\"}"}}]}'
 
-        client = LlmClient(dict(DEFAULT_DECISION, max_retries=1),
+        client = LlmClient(dict(config.DEFAULT_DECISION, max_retries=1),
                            api_key="k", post=fake_post)
         self.assertEqual('{"action": "end_turn"}',
                          client.decide("sys", "user"))
         self.assertEqual(2, len(calls))
+
+    def test_length_truncation_doubles_max_tokens_and_retries(self):
+        """推理型模型思考链吃掉 max_tokens 导致 finish_reason=length：
+        自动加倍上限重试（实测 deepseek-flash 257 次失败的根因）。"""
+        calls = []
+
+        def fake_post(url, payload, timeout, headers):
+            calls.append(payload["max_tokens"])
+            if len(calls) < 2:
+                return 200, (
+                    '{"choices":[{"finish_reason":"length",'
+                    '"message":{"content":"{\\"action\\": \\"end_t"}}]}')
+            return 200, '{"choices":[{"finish_reason":"stop",' \
+                        '"message":{"content":"{\\"action\\": \\"end_turn\\"}"}}]}'
+
+        client = LlmClient(dict(config.DEFAULT_DECISION, max_tokens=200,
+                                max_retries=0),
+                           api_key="k", post=fake_post)
+        self.assertEqual('{"action": "end_turn"}', client.decide("s", "u"))
+        self.assertEqual([200, 400], calls)   # 上限自动加倍
 
 
 class DecisionConfigTests(unittest.TestCase):
