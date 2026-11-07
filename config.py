@@ -260,7 +260,9 @@ DEFAULT_DECISION = {
     "api_base": "https://open.bigmodel.cn/api/paas/v4",
     "model": "glm-4-flash",
     "api_key": "",
-    "timeout_seconds": 8.0,
+    # 决策提示词较大（状态+菜单+经验块），推理模型生成需 5-20s；超时后
+    # 自动回退盒子不重试（避免吃掉回合时间）。可在本段覆盖。
+    "timeout_seconds": 25.0,
     "max_retries": 1,
     # 注意：推理型模型（deepseek-flash/reasoner 等）的思考链也计入
     # max_tokens——实际答案在思考之后输出，上限太低会把 JSON 截断

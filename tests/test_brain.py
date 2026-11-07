@@ -381,6 +381,21 @@ class LlmClientTests(unittest.TestCase):
         self.assertEqual('{"action": "end_turn"}', client.decide("s", "u"))
         self.assertEqual([200, 400], calls)   # 上限自动加倍
 
+    def test_timeout_does_not_retry(self):
+        """超时不重试：重试只会成倍占用回合时间（实测 Read timed out）。"""
+        calls = []
+
+        def fake_post(url, payload, timeout, headers):
+            calls.append(timeout)
+            raise ConnectionError("HTTPSConnectionPool: Read timed out.")
+
+        client = LlmClient(dict(config.DEFAULT_DECISION, max_retries=2,
+                                timeout_seconds=25),
+                           api_key="k", post=fake_post)
+        with self.assertRaisesRegex(LlmUnavailableError, "timed out"):
+            client.decide("s", "u")
+        self.assertEqual(1, len(calls))       # 只尝试一次
+
 
 class DecisionConfigTests(unittest.TestCase):
     def test_default_backend_is_box(self):

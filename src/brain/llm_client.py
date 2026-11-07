@@ -64,6 +64,11 @@ class LlmClient:
                                           headers=headers)
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
+                # 超时不重试：重试大概率再超时，只会成倍占用回合时间，
+                # 调用方（决策流）会立即回退盒子流程
+                if "timed out" in last_error.lower() \
+                        or "timeout" in last_error.lower():
+                    break
                 continue
             if status != 200:
                 last_error = f"http_{status}: {body[:120]}"
