@@ -1,0 +1,21 @@
+[自检] Python 3.12.13 · Windows 11
+[自检] 自检未通过：1 项必须修复（管理员权限）
+[自检] ✅ Python 3.12（64 位）：3.12.13（64 位）
+[自检] ✅ pywin32：已安装 312
+[自检] ✅ opencv-python-headless：已安装 4.10.0.84
+[自检] ✅ numpy：已安装 2.5.2
+[自检] ✅ Pillow：已安装 12.3.0
+[自检] ✅ paddleocr：已安装 2.10.0
+[自检] ✅ paddlepaddle：已安装 2.6.2
+[自检] ✅ psutil：已安装 7.2.2
+[自检] ✅ keyboard：已安装 0.13.5
+[自检] ✅ pynput：已安装 1.8.2
+[自检] ✅ Requests：已安装 2.34.2
+[自检] ✅ click：已安装 8.4.2
+[自检] ✅ setuptools：已安装 84.0.0
+[自检] ❌ 管理员权限：当前不是管理员 —— 鼠标/键盘操作会被系统拦掉（点了没反应）。请以管理员身份运行：右键命令提示符 → 以管理员身份运行 → python web_ui.py。
+[自检] ✅ 屏幕分辨率：1920×1080
+[自检] ✅ 显示缩放（DPI）：96（100%）
+[自检] ✅ 炉石窗口：已找到炉石窗口
+[自检] ✅ 炉石日志目录：E:\Hearthstone\Logs
+[自检] ✅ OCR 模型目录：C:\Users\Summer\AppData\Local\AutoHS\ocr_models\paddleocr（3 个模型）

@@ -1,2 +1,0 @@
-[20:10:39 DEBUG] 当前状态为：+Choosing Card
-[20:11:08 DEBUG] 当前状态为：+Battling
