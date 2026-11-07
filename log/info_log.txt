@@ -1,15 +1,1 @@
-[18:43:34 INFO] 你输了
-[18:43:34 INFO] The last game last for : 8 mins 25 secs
-[18:52:06 INFO] 你输了
-[18:52:06 INFO] The last game last for : 7 mins 55 secs
-[19:00:51 INFO] 你输了
-[19:00:51 INFO] The last game last for : 7 mins 53 secs
-[19:16:29 INFO] 你输了
-[19:16:29 INFO] The last game last for : 15 mins 0 secs
-[19:23:44 INFO] 你输了
-[19:23:44 INFO] The last game last for : 6 mins 35 secs
-[19:39:12 INFO] 你输了
-[19:39:12 INFO] The last game last for : 14 mins 46 secs
-[19:45:11 INFO] 你输了
-[19:45:11 INFO] The last game last for : 5 mins 9 secs
-[19:52:24 INFO] 收到立即停止指令，正在终止自动化……
+[20:15:02 INFO] 收到立即停止指令，正在终止自动化……
